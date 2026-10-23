@@ -91,6 +91,8 @@ python -m kvlab run --config configs/quality.yaml \
 
 所有层和 KV heads 使用共同索引，索引按原始位置升序。随机选择使用独立 Python RNG，样本/重复 seed 保存；同输入、同 seed、同策略可重现。预算大于输入时封顶，实际数量、固定窗口和额外位置（本版为空）显式保存。
 
+策略先统一补齐省略的 `budget: null`（仅 full）和 `recent_window: 0`，再按同一规则生成结果 ID 并检查重复。省略字段与显式默认值视为同一策略，重复配置在加载模型前报错。`full/recent` 的 `recent_window` 只能省略或为 0，非零值会报错；`random_recent` 的窗口必须为预算内的非负整数。合法配置的 ID 保持为 `full`、`recent-b预算-w0`、`random_recent-b预算-w窗口`。
+
 **只在完整 prefill 后干预一次。预算是保留的 prompt KV 数，不是全程总 KV 上限。** 随后新生成 KV 正常追加；生成 N 个输出 token 需要 N−1 次 decode 前向，因此最终 Cache 通常包含 `保留 prompt 数 + N−1` 个位置，最后一个输出 token 尚未送回模型。首个输出 token 使用完整 prefill 的 logits，干预在采样前执行，因此第一步局部误差为零，但策略成本包含在 TTFT。
 
 `position_ids=P+t` 使用原始绝对序列位置，为新 query/key 计算 RoPE。`cache_position=当前物理长度` 只负责紧凑存储和 causal mask。已存 K 保留原始 RoPE 旋转，收集不会重旋转。由于 batch=1、无 padding、每次只解码一个 token，所有保留历史与当前 token 均合法可见。禁止将压缩长度用于后续 RoPE 位置。物理张量减少、后续 dense attention 的 key 长度减少；没有实现稀疏 kernel、量化或卸载。
@@ -132,6 +134,8 @@ python -m kvlab report outputs/<实际运行目录>
 
 报告自动展示上下文/decode/KV、预算/质量、预算/请求时间、模型/管理成本、历史访问、相对 full 的 NLL 变化与加速比。PNG 使用英文轴标签保证无中文字体机器可读，HTML 的解释为中文。缺数据保持 null 并标记未采集，不填零。为避免错误合并，第一版**每次运行独立报告，不跨运行自动比较**；仅相同模式、输入 hash、sample、seed、repeat 与 full 配对，baseline 和单位/n 明示。性能与质量结果分别展示，无法自动组合为同一速度质量点。
 
+预算—完整请求耗时图保留完整策略 ID 和输入长度。同预算不同 `recent_window`，或预算封顶后实际保留数相同的不同请求预算，会显示为独立系列；中位数仅在同一系列内聚合。已有运行可用上面的 `report` 命令重新生成图表，无需重新执行模型。
+
 Profiler 独立执行：
 
 ```bash
@@ -156,7 +160,7 @@ OMP_NUM_THREADS=1 python -m kvlab profile --config configs/tiny-performance.yaml
 | `kvlab/config.py` / `environment.py` | 严格配置与可追踪环境/代码标识 |
 | `tests/` | 位置/Cache/指标/报告等高风险正确性测试 |
 
-新增选择策略时在 `strategies.select` 实现并扩展 `config.validate` 注册：返回升序、唯一、原始 prompt 索引；明确 budget、实际保留与任何固定额外位置，使用独立可重现 RNG。attention-based 策略可在 runner 的干预阶段获取预先定义的统计，但统计采集和选择成本必须进入请求/TTFT，正式性能路径不能借用诊断运行的免费信息。
+新增选择策略时在 `strategies.select` 实现并扩展 `strategies.normalize_strategy/strategy_id` 的参数与身份规则：返回升序、唯一、原始 prompt 索引；明确 budget、实际保留与任何固定额外位置，使用独立可重现 RNG。attention-based 策略可在 runner 的干预阶段获取预先定义的统计，但统计采集和选择成本必须进入请求/TTFT，正式性能路径不能借用诊断运行的免费信息。
 
 量化、CPU 卸载和稀疏 kernel 的扩展入口是 adapter 的 `new_cache/intervene/decode/cache_bytes/theory_bytes`；这些未实现功能当前明确拒绝，不能只注册名字后沿用不兼容 Cache。新适配器须保留逻辑/物理位置分离、GQA 与 mask 语义，不能改权重或污染其他请求；测试必须包含 full/no-op 一致性、mask oracle、多步位置和独立状态。更新 Transformers 版本需重做上述验证。已有论文算法应另命名实现并解释一致性和偏差，不能把这里的简单策略称为 SnapKV/H2O。
 

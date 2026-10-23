@@ -157,7 +157,9 @@ class Adapter:
                 position_ids=torch.arange(ids.shape[1], device=self.device)[None],
                 cache_position=torch.arange(ids.shape[1], device=self.device),
                 attention_mask=None,
-                logits_to_keep=1
+                logits_to_keep=1,
+                output_hidden_states=False,
+                output_attentions=False
                 )
 
     def decode(self, token, cache, absolute_position):
@@ -173,7 +175,9 @@ class Adapter:
                 cache_position=torch.full((1,), physical_position, dtype=torch.long, device=self.device),
                 # batch=1 无 padding。传全 1 mask 会在 HF 内部 .all()时引入 host 同步；None 让 SDPA 使用正确 causal 语义。
                 attention_mask=None,
-                logits_to_keep=1)
+                logits_to_keep=1,
+                output_hidden_states=False,
+                output_attentions=False)
 
     def intervene(self, cache, selection, full=False):
         self.check_cache(cache)

@@ -22,4 +22,4 @@ kvlab = "kvlab.cli:main"
 include = ["kvlab*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "regression_tests"]

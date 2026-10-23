@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import copy
-import json
 from pathlib import Path
+
+from .strategies import normalize_strategy, strategy_id
 
 # 默认配置，允许 extends 覆盖，允许命令行覆盖
 DEFAULTS = {
@@ -148,25 +149,19 @@ def validate(c):
         raise ValueError("input_lengths 必须是正整数/null 列表")
     if d["limit"] is not None and d["limit"] < 1:
         raise ValueError("data.limit 必须为正数")
-    if not c["strategies"] or not any(s.get("name") == "full" for s in c["strategies"]):
-        raise ValueError("每次实验必须包含 full 基线")
+    if not isinstance(c["strategies"], list) or not c["strategies"]:
+        raise ValueError("strategies 必须为非空列表，并包含 full 基线")
     seen = set()
+    normalized = []
     for s in c["strategies"]:
-        if set(s) - {"name", "budget", "recent_window"}:
-            raise ValueError("策略包含未知字段")
-        if s.get("name") not in {"full", "recent", "random_recent"}:
-            raise ValueError("不支持的策略；扩展需注册并验证")
-        if s["name"] != "full" and (not isinstance(s.get("budget"), int) or s["budget"] < 1):
-            raise ValueError("压缩策略 budget 必须为正整数")
-        if s["name"] == "full" and s.get("budget") is not None:
-            raise ValueError("full 不接受预算")
-        window = s.get("recent_window", 0)
-        if window < 0 or (s["name"] == "random_recent" and window > s["budget"]):
-            raise ValueError("recent_window 必须在预算内")
-        identity = json.dumps(s, sort_keys=True)
+        s = normalize_strategy(s)
+        identity = strategy_id(s)
         if identity in seen:
-            raise ValueError("策略配置重复")
+            raise ValueError(f"策略配置重复（结果 ID: {identity}）")
         seen.add(identity)
+        normalized.append(s)
+    if not any(s["name"] == "full" for s in normalized):
+        raise ValueError("每次实验必须包含 full 基线")
     diag = c["diagnostics"]
     if any(diag[k] < 1 for k in ("bins", "chunk_size", "max_keys", "max_records", "top_k")):
         raise ValueError("诊断限制必须为正数")
@@ -179,3 +174,5 @@ def validate(c):
         raise ValueError("诊断 steps 从 1 开始；首 token 来自 prefill，不采集完整 prefill attention")
     if c["quality"]["save_top_k"] < 1 or any(p < 0 for p in c["quality"]["positions"]):
         raise ValueError("无效质量采集参数")
+    # 有效配置持久化同一份规范化参数，避免配置与结果身份不一致。
+    c["strategies"] = normalized

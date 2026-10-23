@@ -228,14 +228,18 @@ def plot(directory, records, comparisons):
     ax.set(xlabel="Retained prompt KV tokens (full at L)", ylabel="Exact match (mean over labeled requests)", ylim=(-.03, 1.03))
     save(fig, "02-quality.png", "保留预算与任务质量", f"仅自由生成质量模式；请求 n={len(quality)}，独立样本 n={len({r['sample_id'] for r in quality})}。full 横坐标为完整 prompt 长度；缺标注不填零。")
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    request_series = {(r["strategy"], r["input_tokens"]) for r in perf}
+    fig, ax = plt.subplots(figsize=(10, max(4, 1 + .18 * len(request_series))))
     for length in sorted({r["input_tokens"] for r in perf}):
-        subset = [dict(r, strategy=f"{r['strategy_config']['name']}, L={length}") for r in perf if r["input_tokens"] == length]
+        # 完整 ID 保留窗口和请求预算；预算封顶后也不混合不同配置。
+        subset = [dict(r, strategy=f"{r['strategy']}, L={length}") for r in perf if r["input_tokens"] == length]
         lines(ax, subset, lambda r: r["selection"]["actual_prompt_kv"], lambda r: r["timing"]["request_wall_ms"], "Retained prompt KV tokens", "Complete request (ms, median)")
-    if not perf:
+    if perf:
+        ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1))
+    else:
         empty(ax)
         ax.set(xlabel="Retained prompt KV tokens", ylabel="Complete request (ms)")
-    save(fig, "03-request.png", "预算与完整请求耗时", f"仅 CUDA 正式固定步数性能模式，n={len(perf)}；边界包含 tokenization、搬运、策略、采样与文本解码。")
+    save(fig, "03-request.png", "预算与完整请求耗时", f"仅 CUDA 正式固定步数性能模式，n={len(perf)}；按完整策略 ID（请求预算与最近窗口）及输入长度分组；横轴为实际保留数。边界包含 tokenization、搬运、策略、采样与文本解码。")
 
     fig, ax = plt.subplots(figsize=(10, 4))
     costgroups = defaultdict(list)

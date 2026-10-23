@@ -13,10 +13,11 @@ from datetime import datetime, timezone
 import torch
 
 from .adapter import Adapter
+from .config import validate
 from .data import prepare, read_samples
 from .diagnostics import Diagnostics
 from .metrics import distribution, summarize, task_score
-from .strategies import select
+from .strategies import select, strategy_id
 from .timing import Clock, choose_token
 
 
@@ -29,10 +30,6 @@ def append(path, obj):
     # 追加 JSONL 文件，确保 UTF-8 编码、非 ASCII 字符和无 NaN
     with Path(path).open("a") as f:
         f.write(json.dumps(obj, ensure_ascii=False, allow_nan=False) + "\n")
-
-
-def strategy_id(s):
-    return "full" if s["name"] == "full" else f"{s['name']}-b{s['budget']}-w{s.get('recent_window', 0)}"
 
 
 def reproducible(seed):
@@ -227,6 +224,8 @@ def teacher_forced(adapter, ids, reference_tokens, strategy, config, seed):
 
 
 def run(config, source_path, overrides=(), profile=False):
+    # Python 调用入口也校验：重复 ID 在加载模型、创建目录前失败。
+    validate(config)
     from .environment import environment, code_identity
     from .report import build_report
     run_name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + "-" + config["label"]
