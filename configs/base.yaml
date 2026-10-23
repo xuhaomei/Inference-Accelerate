@@ -1,0 +1,31 @@
+# 从仓库根目录执行；所有路径相对于当前工作目录。
+mode: quality
+seed: 42
+label: qwen3
+output_dir: outputs
+model:
+  name: Qwen/Qwen3-8B
+  revision: main  # 正式实验建议替换为不可变 commit；实际解析 commit 会保存。
+  tokenizer: null
+  tokenizer_revision: null
+  dtype: bfloat16
+  device: cuda:0
+  backend: sdpa
+  sdpa_kernel: flash  # 只启用此 kernel，不允许自动 fallback。
+  local_files_only: false
+data:
+  path: data/synthetic.jsonl
+  chat_template: true
+  thinking: false
+  input_lengths: [2048]
+generation:
+  max_new_tokens: 128
+  mode: greedy
+  ignore_eos: false
+strategies:
+  - {name: full, budget: null, recent_window: 0}
+  - {name: recent, budget: 512, recent_window: 0}
+  - {name: random_recent, budget: 512, recent_window: 128}
+measurement:
+  warmup: 1
+  repeats: 3

@@ -1,0 +1,14 @@
+extends: base.yaml
+mode: performance
+label: baseline-length-scan
+data:
+  ids: [s0000]
+  input_lengths: [2048, 8192, 16384, 24576]
+generation:
+  max_new_tokens: 256
+  ignore_eos: true
+strategies:
+  - {name: full, budget: null, recent_window: 0}
+measurement:
+  warmup: 2
+  repeats: 5

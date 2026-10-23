@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+outputs/
+data/synthetic*.jsonl
+.DS_Store
+tests/

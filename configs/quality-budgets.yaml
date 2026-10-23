@@ -1,0 +1,10 @@
+extends: quality.yaml
+label: quality-budgets
+strategies:
+  - {name: full, budget: null, recent_window: 0}
+  - {name: recent, budget: 256, recent_window: 0}
+  - {name: random_recent, budget: 256, recent_window: 64}
+  - {name: recent, budget: 512, recent_window: 0}
+  - {name: random_recent, budget: 512, recent_window: 128}
+  - {name: recent, budget: 1024, recent_window: 0}
+  - {name: random_recent, budget: 1024, recent_window: 256}

@@ -1,0 +1,16 @@
+# 最先在目标 GPU 执行，包含 full/no-cache 预检、自由生成与 teacher forcing。
+extends: base.yaml
+label: gpu-smoke
+data:
+  path: data/smoke.jsonl
+  limit: 1
+  input_lengths: [256]
+generation:
+  max_new_tokens: 16
+strategies:
+  - {name: full, budget: null, recent_window: 0}
+  - {name: recent, budget: 64, recent_window: 0}
+  - {name: random_recent, budget: 64, recent_window: 32}
+measurement:
+  warmup: 0
+  repeats: 1

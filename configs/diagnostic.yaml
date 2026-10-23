@@ -1,0 +1,25 @@
+# Forward 仍为 SDPA；hook 对选定单 query 分块重算，不导出 prefill attention。
+extends: base.yaml
+mode: diagnostic
+label: behavior-diagnostic
+data:
+  path: data/smoke.jsonl
+  limit: 1
+  input_lengths: [512]
+generation:
+  max_new_tokens: 32
+strategies:
+  - {name: full, budget: null, recent_window: 0}
+  - {name: recent, budget: 128, recent_window: 0}
+  - {name: random_recent, budget: 128, recent_window: 32}
+diagnostics:
+  layers: [0, 15, 31]
+  heads: [0, 1]
+  steps: [1, 4, 16]
+  bins: 64
+  chunk_size: 2048
+  max_keys: 32768
+  max_records: 24
+measurement:
+  warmup: 0
+  repeats: 1

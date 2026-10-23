@@ -1,0 +1,2 @@
+{"id":"real-unlabeled-template","prompt":"请将这里替换为你有权使用的真实任务原始输入。","task":"custom","metadata":{"dataset":"replace-with-dataset-name","split":"test","source_id":"replace-with-original-id","note":"无 reference 时只保存输出，不计算准确率"}}
+{"id":"real-labeled-schema","prompt":"What is 2 + 2? Return only the number.","reference":["4","four"],"task":"exact_match","metadata":{"dataset":"schema-example-only","note":"接口示例，不代表已接入真实基准"}}

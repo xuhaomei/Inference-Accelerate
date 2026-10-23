@@ -1,0 +1,18 @@
+# 本地随机模型与 byte tokenizer；完全离线，仅验证正确性。
+extends: gpu-smoke.yaml
+label: tiny-cpu-correctness
+model:
+  tiny: true
+  name: builtin-tiny-qwen3
+  device: cpu
+  dtype: float32
+  backend: sdpa
+  sdpa_kernel: math
+data:
+  input_lengths: [512]
+  limit: 2
+generation:
+  max_new_tokens: 8
+measurement:
+  warmup: 1
+  repeats: 2

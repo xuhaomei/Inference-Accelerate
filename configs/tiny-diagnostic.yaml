@@ -1,0 +1,13 @@
+extends: tiny.yaml
+mode: diagnostic
+label: tiny-cpu-diagnostic
+diagnostics:
+  layers: [0, 1]
+  heads: [0, 3]
+  steps: [1, 3, 7]
+  bins: 32
+  chunk_size: 23
+  max_records: 16
+measurement:
+  warmup: 0
+  repeats: 1
