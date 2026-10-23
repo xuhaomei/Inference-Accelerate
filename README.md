@@ -6,15 +6,20 @@
 
 ## 安装与最短路径
 
-从仓库根目录执行，建议 Linux、Python 3.11–3.13，CUDA 与 PyTorch 2.8 对应。CUDA wheel 按你的驱动环境从 PyTorch 官方源安装；下面安装会复用已安装的同版本 torch。没有 GPU 也能运行 CPU tiny 测试。
+从仓库根目录执行，服务器目标版本为 **Python 3.10.12**（项目最低版本也是 3.10.12），建议 Linux，CUDA 与 PyTorch 2.8 对应。CUDA wheel 按你的驱动环境从 PyTorch 官方源安装；下面安装会复用已安装的同版本 torch。没有 GPU 也能运行 CPU tiny 测试。
 
 ```bash
-python3 -m venv .venv
+python3.10 -c 'import sys; assert sys.version_info[:3] == (3, 10, 12), sys.version'
+python3.10 -m venv .venv
 source .venv/bin/activate
+python --version
 python -m pip install -e '.[test]'
+python -m pip check
 python -m kvlab env --config configs/environment.yaml --output outputs/environment.json
 python -m pytest -q
 ```
+
+虚拟环境沿用创建它的解释器；已有其他 Python 版本创建的环境应换用新目录，例如 `.venv310`，再激活对应环境。依赖固定为 PyTorch 2.8.0、Transformers 4.57.1、NumPy 2.2.6、matplotlib 3.10.7 和 PyYAML 6.0.3。[NumPy 2.2.6](https://pypi.org/project/numpy/2.2.6/) 支持 Python 3.10，原先的 2.3.4 要求 Python >=3.11；模型与 Cache 相关依赖版本保持原值。新旧依赖环境的实验应分别保存环境元数据，避免将不同版本的结果无条件合并。
 
 `env` 不加载/下载模型；依赖未安装时 `python -m kvlab env` 仍可检查缺失项。指定 CUDA 配置但无 CUDA 时返回退出码 2。
 
