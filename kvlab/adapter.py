@@ -217,7 +217,15 @@ class Adapter:
             ids.append(int(token.item()))
             logits = self.decode(token, cache, len(ids)-1).logits[:, -1]
             with self.backend_context():
-                oracle = self.model(input_ids=self.tensor(ids), use_cache=False, logits_to_keep=1).logits[:, -1]
+                oracle_ids = self.tensor(ids)
+                # HF 4.57.1 在无 Cache、mask=None 时会构造 packed-sequence 4D mask，Flash 不支持。
+                # 无 padding 的二维全 1 mask 可被 HF 优化为 SDPA mask=None + is_causal=True。
+                oracle = self.model(
+                    input_ids=oracle_ids,
+                    attention_mask=torch.ones_like(oracle_ids, dtype=torch.bool),
+                    use_cache=False,
+                    logits_to_keep=1,
+                ).logits[:, -1]
             error = (logits.float() - oracle.float()).abs().max().item()
             max_error = max(max_error, error)
             atol = 0.08 if logits.dtype == torch.bfloat16 else 0.01 if logits.dtype == torch.float16 else 2e-5
