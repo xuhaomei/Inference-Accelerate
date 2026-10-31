@@ -116,6 +116,26 @@ def build_report(directory, records=None):
     esc = lambda v: html.escape(str(v))
     def artifact(name, title):
         return f'<a href="{name}">{esc(title)}</a>' if (directory / name).exists() else f'{esc(title)}：未采集'
+    validation_summary = validation_text
+    validation_details = ""
+    if validation_text and validation_text.get("schema_version") == 2:
+        validation_summary = {key: validation_text.get(key) for key in (
+            "passed", "semantic_checks_passed", "finite_checks_passed", "legacy_allclose_passed",
+            "first_failed_step", "first_failed_stage", "completed_steps", "planned_steps",
+            "max_abs_logits_error", "atol", "rtol", "scope")}
+        validation_rows = []
+        for step in validation_text["steps"]:
+            for pair, metrics in step["comparisons"].items():
+                validation_rows.append("<tr>" + "".join(f"<td>{esc(value)}</td>" for value in (
+                    step["step"], step["reference_token_id"], pair, metrics["max_abs"], metrics["rmse"],
+                    metrics["failed_fraction"], metrics["kl_reference_to_candidate"], metrics["top1_equal"],
+                    metrics["legacy_allclose_passed"])) + "</tr>")
+        fatal = validation_text.get("fatal_error")
+        validation_details = f'''<section><h2>运行前预检诊断</h2>
+<p>A：平台 full/no-op Cache；B：直接 HF Cache；C：无 Cache 重算。step=0 预测首个参考 token，step=i 喂入参考 token i−1，预测参考 token i。旧数值门槛仅使用 decode 步的 A_vs_C；其他比较用于定位。所有采集与同步均在正式计时之前，检查失败后不会进入正式测量。</p>
+<p>{artifact('validation_trajectory.json', '固定参考轨迹')} · {artifact('full_validation.json', '位置、KV、SDPA 参数与违规分量原始记录')}</p>
+<p>{esc(fatal['message']) if fatal else '无前向/语义/非有限值致命错误；数值超差仍按原门槛判定。'}</p>
+<div class="scroll"><table><thead><tr><th>step</th><th>目标 token</th><th>candidate_vs_reference</th><th>max abs</th><th>RMSE</th><th>违规比例</th><th>KL(reference‖candidate)</th><th>top-1 相同</th><th>allclose</th></tr></thead><tbody>{''.join(validation_rows)}</tbody></table></div></section>'''
     artifact_links = " · ".join(artifact(name, title) for name, title in [
         ("config.resolved.json", "有效配置"), ("environment.json", "环境"), ("model.json", "模型与模板"),
         ("code.json", "代码标识"), ("records.jsonl", "JSONL"), ("records.csv", "原始 CSV"),
@@ -140,13 +160,16 @@ def build_report(directory, records=None):
               if mode == "performance" and any(r.get("timing", {}).get("gpu_measurement_valid")
                                                and not r.get("profile") for r in records)
               else "本次结果不能作为正式 GPU 性能结论：质量/诊断/CPU/profiler 数据已隔离。")
+    if status.get("validation_only"):
+        banner = "独立预检：未执行正式生成、质量评测或性能测量；报告包含固定轨迹的前向诊断。"
     document = f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KVLab 实验报告</title><style>body{{font:16px/1.65 system-ui,sans-serif;color:#172b4d;background:#f3f6fa;margin:0 auto;padding:28px;max-width:1200px}}section,header{{background:white;border-radius:12px;padding:22px;margin:18px 0}}h1,h2{{line-height:1.3}}img{{max-width:100%;height:auto}}.notice{{border-left:5px solid #b86c14;padding:12px;background:#fff3d6}}table{{border-collapse:collapse;width:100%;font-size:13px}}th,td{{border-bottom:1px solid #dde4ee;text-align:left;padding:8px}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}a{{color:#176b94}}.scroll{{overflow:auto}}</style>
 <header><h1>KVLab · {esc(config['label'])}</h1><p>模式：<strong>{esc(mode)}</strong> · 状态：{esc(status['status'])} · 原始记录：{len(records)}</p>
 <p class="notice">{esc(banner)}</p><p>首 token 始终来自完整 prefill 的 logits；一次干预发生在采样首 token 之前，TTFT 包括策略成本。预算仅指 prompt KV，新生成 KV 正常追加。物理索引收集减少 KV 存储与后续 dense attention 的 key 长度，未实现稀疏 kernel；收益必须以实际结果判断。</p>
 <p>{esc('；'.join(status.get('warnings', [])))}</p><p>{esc(status.get('error', ''))}</p>
-<p>full/no-cache 短前缀预检：{esc(json.dumps(validation_text, ensure_ascii=False)) if validation_text else '未采集'}。{artifact('full_validation.json', '预检原始记录')}；短前缀不代表长上下文正确性或性能已验证。</p>
+<p>full/no-cache 短前缀预检：{esc(json.dumps(validation_summary, ensure_ascii=False)) if validation_summary else '未采集'}。{artifact('full_validation.json', '预检原始记录')}；短前缀不代表长上下文正确性或性能已验证。</p>
 <p>{artifact_links}</p></header>
+{validation_details}
 <section><h2>测量口径</h2><p>GPU 前向时间来自 CUDA Events，CPU 验证使用 perf_counter，GPU 缺失值保持 null。完整请求从内存中原始 prompt 的 tokenization 前开始，到全部生成 token 搬回 CPU 并解码为文本结束，排除模型加载、数据集读取、评分和文件写入。TTFT 从 prefill 前到策略执行和首 token 采样、搬回 CPU 完成。每步 Events 不逐步同步；自然 EOS 的 host 检查另有标记。</p><p>阶段 GPU interval 含排队/主机发射间隙，策略 wall 包括 CPU 选择和同步。模型前向内包含框架原生 Cache 更新。阶段 Events 与 wall 时间可能重叠，成本图使用并列区间，不做机械求和。显存为 PyTorch allocator 口径，阶段增量是相对阶段开始的基线；reserved 受预热和 allocator 历史影响。KV 字节为实际 tensor 大小，不是 HBM 流量。</p><p>聚合保留中位数、IQR、min/max、标准差；不足 20 次不报告尾延迟，本版统一不估计 p95/p99。准确率以有标注请求为分母，重复请求不等于独立样本；截断率为达到 max_new_tokens 且未遇 EOS 的请求比例。KL=KL(full||strategy)，FP32 log_softmax；首位置 KL 预期为零。</p></section>
 <section><h2>真实记录聚合</h2><div class="scroll"><table><thead><tr>{''.join('<th>'+x+'</th>' for x in ['模式','任务','策略','输入 tokens','独立样本','请求 n','EM 均值','截断率','完整请求中位 ms','IQR ms'])}</tr></thead><tbody>{''.join(table) or '<tr><td>未采集</td></tr>'}</tbody></table></div></section>
 {''.join(sections)}<section><h2>完整模型输出</h2>{''.join(outputs) or '<p>未采集</p>'}</section>

@@ -22,7 +22,8 @@ def main(argv=None):
     synth.add_argument("--count", type=int, default=8)
     synth.add_argument("--records", type=int, default=128)
     synth.add_argument("--seed", type=int, default=42)
-    for command, help_text in (("run", "运行实验"), ("profile", "独立 PyTorch Profiler，不用于性能结论")):
+    for command, help_text in (("run", "运行实验"), ("profile", "独立 PyTorch Profiler，不用于性能结论"),
+                               ("validate", "独立固定轨迹预检，不执行正式测量")):
         p = sub.add_parser(command, help=help_text)
         p.add_argument("--config", required=True)
         p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="覆盖配置，可重复")
@@ -50,10 +51,11 @@ def main(argv=None):
             from .data import synthetic
             rows = synthetic(args.output, args.count, args.records, args.seed)
             print(f"已保存 {len(rows)} 个样本：{args.output}")
-        elif args.command in {"run", "profile"}:
+        elif args.command in {"run", "profile", "validate"}:
             from .config import load
             from .runner import run
-            run(load(args.config, args.set), args.config, args.set, profile=args.command == "profile")
+            run(load(args.config, args.set), args.config, args.set, profile=args.command == "profile",
+                validation_only=args.command == "validate")
         elif args.command == "report":
             from .report import build_report
             print(build_report(args.directory).resolve())

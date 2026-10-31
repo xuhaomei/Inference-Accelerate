@@ -58,6 +58,12 @@ DEFAULTS = {
         "positions": [0, 1, 3, 7, 15, 31],
         "save_top_k": 8
         },
+    "validation": {
+        "prefix_tokens": 32,
+        "decode_steps": 3,
+        "top_k": 8,
+        "trajectory_path": None,
+    },
     "diagnostics": {
         "layers": [0],
         "heads": [0],
@@ -174,5 +180,11 @@ def validate(c):
         raise ValueError("诊断 steps 从 1 开始；首 token 来自 prefill，不采集完整 prefill attention")
     if c["quality"]["save_top_k"] < 1 or any(p < 0 for p in c["quality"]["positions"]):
         raise ValueError("无效质量采集参数")
+    v = c["validation"]
+    for key in ("prefix_tokens", "decode_steps", "top_k"):
+        if type(v[key]) is not int or v[key] < 1:
+            raise ValueError(f"validation.{key} 必须是正整数")
+    if v["trajectory_path"] is not None and (not isinstance(v["trajectory_path"], str) or not v["trajectory_path"]):
+        raise ValueError("validation.trajectory_path 必须是非空路径字符串或 null")
     # 有效配置持久化同一份规范化参数，避免配置与结果身份不一致。
     c["strategies"] = normalized

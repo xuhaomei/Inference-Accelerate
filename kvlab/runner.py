@@ -223,9 +223,11 @@ def teacher_forced(adapter, ids, reference_tokens, strategy, config, seed):
         "scope": "fixed_reference_trajectory_not_free_generation_quality"}
 
 
-def run(config, source_path, overrides=(), profile=False):
+def run(config, source_path, overrides=(), profile=False, validation_only=False):
     # Python 调用入口也校验：重复 ID 在加载模型、创建目录前失败。
     validate(config)
+    if profile and validation_only:
+        raise ValueError("独立预检不能同时启用 profiler")
     from .environment import environment, code_identity
     from .report import build_report
     run_name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + "-" + config["label"]
@@ -252,6 +254,7 @@ def run(config, source_path, overrides=(), profile=False):
     status = {
         "status": "running",
         "profile": profile,
+        "validation_only": validation_only,
         "warnings": warnings
         }
     dump(directory / "status.json", status)
@@ -272,8 +275,21 @@ def run(config, source_path, overrides=(), profile=False):
                 ids, _ = prepare(adapter.tokenizer, sample, config, target)
                 adapter.check_length(len(ids))
                 cases.append((sample, target, ids))
-        # 检测第一个样本使用KV Cache和不使用KV Cache的输出是否一致
-        dump(directory / "full_validation.json", adapter.validate_full(list(cases[0][2])))
+        # 先写诊断证据，再执行验收；数值失败不会丢失逐步报告或参考轨迹。
+        from .validation import FullValidationError
+        validation_report = adapter.validate_full(list(cases[0][2]), raise_on_failure=False)
+        validation_report["sample_id"] = cases[0][0]["id"]
+        validation_report["requested_input_tokens"] = cases[0][1]
+        dump(directory / "full_validation.json", validation_report)
+        dump(directory / "validation_trajectory.json", validation_report["trajectory"])
+        status["validation"] = {key: validation_report[key] for key in (
+            "passed", "semantic_checks_passed", "finite_checks_passed", "legacy_allclose_passed",
+            "first_failed_step", "first_failed_stage", "completed_steps", "planned_steps")}
+        if not validation_report["passed"]:
+            raise FullValidationError(validation_report)
+        if validation_only:
+            status["status"] = "complete"
+            return directory
         if profile:
             warnings.append("独立 profiler 运行，全部耗时不可用于正式性能结论")
         strategies = sorted(config["strategies"], key=lambda s: s["name"] != "full")

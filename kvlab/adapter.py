@@ -58,6 +58,7 @@ class Adapter:
         
         dtype = getattr(torch, m["dtype"])
         if m["tiny"]:
+            self.initialization_seed = torch.initial_seed()
             # 仅用于正确性验证的 tiny Qwen3，随机权重，非研究结论；不下载模型。
             mc = Qwen3Config(vocab_size=259,
                             hidden_size=64,
@@ -203,39 +204,13 @@ class Adapter:
         return 2 * c.num_hidden_layers * c.num_key_value_heads * head_dim * length * next(self.model.parameters()).element_size()
 
     @torch.inference_mode()
-    def validate_full(self, ids):
-        """预检：full/no-op cached decode 与不使用 Cache 的连续前向比较。"""
-        from .strategies import select
-        ids = ids[: min(32, len(ids))]
-        t = self.tensor(ids)
-        cache = self.new_cache()
-        logits = self.prefill(t, cache).logits[:, -1]
-        self.intervene(cache, select(len(ids), {"name": "full"}, 0), full=True)
-        max_error = 0.0
-        for i in range(3):
-            token = logits.argmax(-1)
-            ids.append(int(token.item()))
-            logits = self.decode(token, cache, len(ids)-1).logits[:, -1]
-            with self.backend_context():
-                oracle_ids = self.tensor(ids)
-                # HF 4.57.1 在无 Cache、mask=None 时会构造 packed-sequence 4D mask，Flash 不支持。
-                # 无 padding 的二维全 1 mask 可被 HF 优化为 SDPA mask=None + is_causal=True。
-                oracle = self.model(
-                    input_ids=oracle_ids,
-                    attention_mask=torch.ones_like(oracle_ids, dtype=torch.bool),
-                    use_cache=False,
-                    logits_to_keep=1,
-                ).logits[:, -1]
-            error = (logits.float() - oracle.float()).abs().max().item()
-            max_error = max(max_error, error)
-            atol = 0.08 if logits.dtype == torch.bfloat16 else 0.01 if logits.dtype == torch.float16 else 2e-5
-            if not torch.allclose(logits.float(), oracle.float(), atol=atol, rtol=0.02):
-                raise RuntimeError(f"full 与无 Cache 原始路径不一致：max_abs={error}")
-        return {"passed": True,
-                "max_abs_logits_error": max_error, 
-                "tested_decode_steps": 3,
-                "prompt_prefix_tokens": t.shape[1], "atol": atol, "rtol": 0.02,
-                "dtype": str(logits.dtype), "scope": "short_prefix_correctness_only"}
+    def validate_full(self, ids, *, raise_on_failure=True):
+        """先采集固定轨迹的三路径报告；默认保留旧接口的失败抛异常行为。"""
+        from .validation import FullValidationError, collect_full_validation
+        report = collect_full_validation(self, ids)
+        if raise_on_failure and not report["passed"]:
+            raise FullValidationError(report)
+        return report
 
     def metadata(self):
         # 使用的模型、tokenizer、配置、参数量、冻结状态、后端实现、SDPA kernel、模板等信息。
