@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from pathlib import Path
 
 from .strategies import normalize_strategy, strategy_id
@@ -63,6 +64,18 @@ DEFAULTS = {
         "decode_steps": 3,
         "top_k": 8,
         "trajectory_path": None,
+        # 试运行阈值，需在目标模型、backend 和代表性输入上校准。
+        "thresholds": {
+            "float32": {"cached_atol": 2e-5, "cached_rtol": 0.02,
+                        "kl": 1e-7, "probability_l1": 1e-4, "nll_abs": 1e-3,
+                        "warn_logprob_max_abs": 1e-3},
+            "float16": {"cached_atol": 0.01, "cached_rtol": 0.02,
+                        "kl": 1e-5, "probability_l1": 0.002, "nll_abs": 0.001,
+                        "warn_logprob_max_abs": 0.01},
+            "bfloat16": {"cached_atol": 0.08, "cached_rtol": 0.02,
+                         "kl": 1e-3, "probability_l1": 0.02, "nll_abs": 0.01,
+                         "warn_logprob_max_abs": 0.1},
+        },
     },
     "diagnostics": {
         "layers": [0],
@@ -186,5 +199,15 @@ def validate(c):
             raise ValueError(f"validation.{key} 必须是正整数")
     if v["trajectory_path"] is not None and (not isinstance(v["trajectory_path"], str) or not v["trajectory_path"]):
         raise ValueError("validation.trajectory_path 必须是非空路径字符串或 null")
+    limits = v["thresholds"]
+    defaults = DEFAULTS["validation"]["thresholds"]
+    if not isinstance(limits, dict) or set(limits) != set(defaults):
+        raise ValueError("validation.thresholds 必须包含且仅包含 float32/float16/bfloat16")
+    for dtype, thresholds in limits.items():
+        if not isinstance(thresholds, dict) or set(thresholds) != set(defaults[dtype]):
+            raise ValueError(f"validation.thresholds.{dtype} 字段不完整或包含未知字段")
+        for key, value in thresholds.items():
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"validation.thresholds.{dtype}.{key} 必须是有限非负数")
     # 有效配置持久化同一份规范化参数，避免配置与结果身份不一致。
     c["strategies"] = normalized

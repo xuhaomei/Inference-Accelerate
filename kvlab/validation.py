@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 import traceback
 from unittest.mock import patch
@@ -15,7 +17,8 @@ import torch.nn.functional as F
 class FullValidationError(RuntimeError):
     def __init__(self, report):
         self.report = report
-        reason = report["fatal_error"]["message"] if report["fatal_error"] else "full 与无 Cache 的 logits 超出原有容差"
+        reason = (report["fatal_error"]["message"] if report["fatal_error"] else
+                  f"分层判定失败：{report['first_failed_stage']}")
         super().__init__(
             f"full 预检失败：first_failed_step={report['first_failed_step']}, "
             f"max_abs={report['max_abs_logits_error']}；{reason}；详情见 full_validation.json")
@@ -42,7 +45,8 @@ def compare_logits(reference, candidate, token_id, atol, rtol=0.02, top_k=8):
               "max_abs": None, "mean_abs": None, "rmse": None, "mean_bias": None,
               "centered_rmse": None, "failed_count": None, "failed_fraction": None,
               "max_excess": None, "kl_reference_to_candidate": None, "probability_l1": None,
-              "reference_nll": None, "candidate_nll": None,
+              "reference_nll": None, "candidate_nll": None, "nll_abs_error": None,
+              "logprob_max_abs": None,
               "reference_top": None, "candidate_top": None, "top1_equal": None,
               "worst_absolute_errors": [], "worst_violations": [],
               "nonfinite_reference_count": int((~torch.isfinite(a)).sum()),
@@ -62,7 +66,9 @@ def compare_logits(reference, candidate, token_id, atol, rtol=0.02, top_k=8):
         failed_count=int((~close).sum()), failed_fraction=(~close).double().mean().item(),
         max_excess=excess.max().item(), kl_reference_to_candidate=(pa * (la-lb)).sum().item(),
         probability_l1=(pa-pb).abs().sum().item(),
-        reference_nll=-la[token_id].item(), candidate_nll=-lb[token_id].item())
+        reference_nll=-la[token_id].item(), candidate_nll=-lb[token_id].item(),
+        nll_abs_error=(la[token_id]-lb[token_id]).abs().item(),
+        logprob_max_abs=(la-lb).abs().max().item())
 
     def top(logits, probabilities):
         values, indices = logits.topk(min(2, logits.numel()))
@@ -85,6 +91,39 @@ def compare_logits(reference, candidate, token_id, atol, rtol=0.02, top_k=8):
         indices = violating[excess[violating].topk(min(top_k, len(violating))).indices]
         result["worst_violations"] = [entry(i) for i in indices.tolist()]
     return result
+
+
+def assess_comparison(metrics, pair, thresholds):
+    """逐步判定；原始 logits/全词表 log-probability 偏差不替代分布门槛。"""
+    checks = {}
+
+    def bounded(name, value, limit):
+        passed = (type(value) in (int, float) and math.isfinite(value) and abs(value) <= limit)
+        checks[name] = {"value": value, "limit": limit, "passed": passed}
+        return passed
+
+    distribution = [bounded("kl", metrics["kl_reference_to_candidate"], thresholds["kl"]),
+                    bounded("probability_l1", metrics["probability_l1"], thresholds["probability_l1"]),
+                    bounded("nll_abs", metrics["nll_abs_error"], thresholds["nll_abs"])]
+    implementation = metrics["legacy_allclose_passed"] if pair == "A_vs_B" else None
+    if implementation is not None:
+        checks["cached_allclose"] = {"value": implementation, "limit": True, "passed": implementation}
+    top1 = metrics["top1_equal"] is True
+    checks["top1"] = {"value": metrics["top1_equal"], "limit": True, "passed": top1}
+    warnings = []
+    if pair != "A_vs_B" and not metrics["legacy_allclose_passed"]:
+        warnings.append({"metric": "legacy_allclose", "value": False, "limit": True,
+                         "message": "原始 logits 超出旧容差；保留数值偏差，不据此单独拒绝分布近似"})
+    value = metrics["logprob_max_abs"]
+    if value is not None and value > thresholds["warn_logprob_max_abs"]:
+        warnings.append({"metric": "logprob_max_abs", "value": value,
+                         "limit": thresholds["warn_logprob_max_abs"],
+                         "message": "全词表 log-probability 存在明显偏差；低概率区域与目标 NLL 需单独评估"})
+    return {"passed": metrics["finite_checks_passed"] and all(distribution) and top1 and implementation is not False,
+            "implementation_passed": implementation, "distribution_passed": all(distribution),
+            "top1_passed": top1, "checks": checks,
+            "failed_checks": [name for name, check in checks.items() if not check["passed"]],
+            "warnings": warnings}
 
 
 def _tensor_info(tensor):
@@ -283,17 +322,23 @@ def collect_full_validation(adapter, ids):
     v = adapter.config["validation"]
     prefix = list(ids[:v["prefix_tokens"]])
     dtype = next(adapter.model.parameters()).dtype
-    atol = 0.08 if dtype == torch.bfloat16 else 0.01 if dtype == torch.float16 else 2e-5
-    report = {"schema_version": 2, "passed": False, "semantic_checks_passed": None,
+    dtype_key = str(dtype).removeprefix("torch.")
+    thresholds = copy.deepcopy(v["thresholds"][dtype_key])
+    atol, rtol = thresholds["cached_atol"], thresholds["cached_rtol"]
+    report = {"schema_version": 3, "passed": False, "semantic_checks_passed": None,
               "finite_checks_passed": None, "legacy_allclose_passed": None,
+              "implementation_checks_passed": None, "distribution_checks_passed": None,
+              "top1_checks_passed": None, "numeric_status": "incomplete", "warnings": [],
+              "policy": {"name": "layered-v1", "dtype": dtype_key, "thresholds": thresholds,
+                         "calibration": "provisional; calibrate on representative model/backend/input cases"},
               "first_failed_step": None, "first_failed_stage": None, "fatal_error": None,
               "planned_steps": v["decode_steps"] + 1, "completed_steps": 0,
               "tested_decode_steps": 0, "prompt_prefix_tokens": len(prefix),
               "source_input_tokens": len(ids),
-              "max_abs_logits_error": None, "atol": atol, "rtol": 0.02, "dtype": str(dtype),
+              "max_abs_logits_error": None, "atol": atol, "rtol": rtol, "dtype": str(dtype),
               "scope": "short_prefix_correctness_only", "steps": [], "trajectory": None,
               "numeric": "legacy FP32 allclose; CPU FP64 statistics; signed KL; no epsilon clipping",
-              "acceptance": "unchanged A_vs_C allclose on decode steps, plus finite/semantic checks; B comparisons diagnostic only",
+              "acceptance": "all steps: semantic/finite, A_vs_B allclose, all pairs KL/L1/target NLL and top1; raw/logprob deviations warn",
               "paths": {"A": "platform cached full/no-op", "B": "direct HF cached with inferred positions",
                         "C": "uncached full prefix with explicit 2D all-ones padding mask"}}
     identity = _identity(adapter)
@@ -340,7 +385,8 @@ def collect_full_validation(adapter, ids):
                 row = {"step": step, "phase": "prefill" if step == 0 else "decode",
                        "fed_token_id": None if step == 0 else trajectory["reference_token_ids"][step-1],
                        "prediction_absolute_position": len(prefix) + step,
-                       "reference_token_id": None, "completed": False, "paths": {}, "comparisons": {}}
+                       "reference_token_id": None, "completed": False, "paths": {}, "comparisons": {},
+                       "assessments": {}}
                 report["steps"].append(row)
                 current_ids = prefix + trajectory["reference_token_ids"][:step]
 
@@ -411,16 +457,20 @@ def collect_full_validation(adapter, ids):
                 for pair, reference_logits, logits in (("A_vs_C", c.logits, a.logits),
                                                        ("A_vs_B", b.logits, a.logits),
                                                        ("B_vs_C", c.logits, b.logits)):
-                    metrics = compare_logits(reference_logits, logits, target, atol, top_k=v["top_k"])
+                    metrics = compare_logits(reference_logits, logits, target, atol, rtol, top_k=v["top_k"])
                     metrics["candidate_path"], metrics["reference_path"] = pair.split("_vs_")
                     row["comparisons"][pair] = metrics
                     trace.require(metrics["finite_checks_passed"], f"{pair} logits 非有限", "nonfinite")
+                    assessment = assess_comparison(metrics, pair, thresholds)
+                    row["assessments"][pair] = assessment
+                    report["warnings"].extend({"step": step, "pair": pair, **warning}
+                                              for warning in assessment["warnings"])
+                    if not assessment["passed"]:
+                        remember_failure(step, f"{pair}.{assessment['failed_checks'][0]}")
                 if step > 0:
                     metrics = row["comparisons"]["A_vs_C"]
                     legacy.append(metrics["legacy_allclose_passed"])
                     report["max_abs_logits_error"] = max(report["max_abs_logits_error"] or 0, metrics["max_abs"])
-                    if not metrics["legacy_allclose_passed"]:
-                        remember_failure(step, "A_vs_C.allclose")
                 row["completed"] = True
                 report["completed_steps"] += 1
                 report["tested_decode_steps"] = step
@@ -432,11 +482,22 @@ def collect_full_validation(adapter, ids):
     trajectory["complete"] = len(trajectory["reference_token_ids"]) == report["planned_steps"]
     report["legacy_allclose_passed"] = (False if False in legacy else
                                          True if len(legacy) == v["decode_steps"] else None)
+    for key, field in (("implementation_checks_passed", "implementation_passed"),
+                       ("distribution_checks_passed", "distribution_passed"),
+                       ("top1_checks_passed", "top1_passed")):
+        values = [assessment[field] for row in report["steps"] for assessment in row["assessments"].values()
+                  if assessment[field] is not None]
+        expected = report["planned_steps"] * (1 if field == "implementation_passed" else 3)
+        report[key] = False if False in values else True if len(values) == expected else None
     if report["completed_steps"] < report["planned_steps"]:
         for key in ("semantic_checks_passed", "finite_checks_passed"):
             if report[key] is True:
                 report[key] = None  # 未观察到错误不代表未执行的剩余检查已经通过。
     report["passed"] = (report["fatal_error"] is None and trajectory["complete"]
+                        and report["completed_steps"] == report["planned_steps"]
                         and report["semantic_checks_passed"] is True and report["finite_checks_passed"] is True
-                        and report["legacy_allclose_passed"] is True)
+                        and report["implementation_checks_passed"] is True
+                        and report["distribution_checks_passed"] is True and report["top1_checks_passed"] is True)
+    report["numeric_status"] = ("pass_with_warnings" if report["warnings"] else "pass") if report["passed"] else (
+        "failed" if report["first_failed_stage"] is not None else "incomplete")
     return report

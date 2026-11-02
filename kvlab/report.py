@@ -118,9 +118,10 @@ def build_report(directory, records=None):
         return f'<a href="{name}">{esc(title)}</a>' if (directory / name).exists() else f'{esc(title)}：未采集'
     validation_summary = validation_text
     validation_details = ""
-    if validation_text and validation_text.get("schema_version") == 2:
+    if validation_text and validation_text.get("schema_version") in (2, 3):
         validation_summary = {key: validation_text.get(key) for key in (
             "passed", "semantic_checks_passed", "finite_checks_passed", "legacy_allclose_passed",
+            "implementation_checks_passed", "distribution_checks_passed", "top1_checks_passed", "numeric_status",
             "first_failed_step", "first_failed_stage", "completed_steps", "planned_steps",
             "max_abs_logits_error", "atol", "rtol", "scope")}
         validation_rows = []
@@ -128,14 +129,25 @@ def build_report(directory, records=None):
             for pair, metrics in step["comparisons"].items():
                 validation_rows.append("<tr>" + "".join(f"<td>{esc(value)}</td>" for value in (
                     step["step"], step["reference_token_id"], pair, metrics["max_abs"], metrics["rmse"],
-                    metrics["failed_fraction"], metrics["kl_reference_to_candidate"], metrics["top1_equal"],
-                    metrics["legacy_allclose_passed"])) + "</tr>")
+                    metrics["failed_fraction"], metrics["kl_reference_to_candidate"], metrics.get("probability_l1"),
+                    metrics.get("nll_abs_error"), metrics.get("logprob_max_abs"), metrics["top1_equal"],
+                    metrics["legacy_allclose_passed"],
+                    step.get("assessments", {}).get(pair, {}).get("failed_checks", "旧版未采集"))) + "</tr>")
         fatal = validation_text.get("fatal_error")
+        layered = validation_text.get("schema_version") == 3
+        policy_text = ("分层验收覆盖 prefill 和全部 decode：A/B logits allclose；三组比较均检查 KL、概率 L1、目标 NLL 与 top-1。"
+                       "原始 A/C、B/C logits 超差与全词表 log-probability 偏差单独告警。pass_with_warnings 允许继续运行，"
+                       "但不代表全词表数值稳定性已验证；默认阈值为待校准的试运行值。" if layered else
+                       "旧版数值门槛仅使用 decode 步的 A_vs_C allclose；其他比较仅用于定位。")
+        policy_details = (f"<p>生效策略：{esc(json.dumps(validation_text['policy'], ensure_ascii=False))}</p>" if layered else "")
+        warning_items = "".join(f"<li>{esc(json.dumps(w, ensure_ascii=False))}</li>"
+                                for w in validation_text.get("warnings", []))
         validation_details = f'''<section><h2>运行前预检诊断</h2>
-<p>A：平台 full/no-op Cache；B：直接 HF Cache；C：无 Cache 重算。step=0 预测首个参考 token，step=i 喂入参考 token i−1，预测参考 token i。旧数值门槛仅使用 decode 步的 A_vs_C；其他比较用于定位。所有采集与同步均在正式计时之前，检查失败后不会进入正式测量。</p>
+<p>A：平台 full/no-op Cache；B：直接 HF Cache；C：无 Cache 重算。step=0 预测首个参考 token，step=i 喂入参考 token i−1，预测参考 token i。{policy_text}所有采集与同步均在正式计时之前，硬门槛失败后不会进入正式测量。</p>
 <p>{artifact('validation_trajectory.json', '固定参考轨迹')} · {artifact('full_validation.json', '位置、KV、SDPA 参数与违规分量原始记录')}</p>
-<p>{esc(fatal['message']) if fatal else '无前向/语义/非有限值致命错误；数值超差仍按原门槛判定。'}</p>
-<div class="scroll"><table><thead><tr><th>step</th><th>目标 token</th><th>candidate_vs_reference</th><th>max abs</th><th>RMSE</th><th>违规比例</th><th>KL(reference‖candidate)</th><th>top-1 相同</th><th>allclose</th></tr></thead><tbody>{''.join(validation_rows)}</tbody></table></div></section>'''
+<p>{esc(fatal['message']) if fatal else '无前向/语义/非有限值致命错误；最终结论见各层判定。'}</p>
+{policy_details}<ul>{warning_items}</ul>
+<div class="scroll"><table><thead><tr><th>step</th><th>目标 token</th><th>candidate_vs_reference</th><th>max abs</th><th>RMSE</th><th>旧容差违规比例</th><th>KL(reference‖candidate)</th><th>概率 L1</th><th>目标 NLL 绝对差</th><th>最大 log-probability 差</th><th>top-1 相同</th><th>旧 allclose</th><th>分层失败项</th></tr></thead><tbody>{''.join(validation_rows)}</tbody></table></div></section>'''
     artifact_links = " · ".join(artifact(name, title) for name, title in [
         ("config.resolved.json", "有效配置"), ("environment.json", "环境"), ("model.json", "模型与模板"),
         ("code.json", "代码标识"), ("records.jsonl", "JSONL"), ("records.csv", "原始 CSV"),

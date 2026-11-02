@@ -104,6 +104,59 @@ python -m kvlab run --config configs/quality.yaml \
 
 每个方法、每个重复都独立重新 prefill；不复用被裁剪的 Cache。运行前用短前缀执行 full/no-op Cache 与无 Cache 连续前向检查，并保存误差和容差口径；测试另与 HF `generate`、稠密 mask oracle 多步对照。短前检不能代替大模型长上下文实测。
 
+## 预检诊断与固定轨迹重放
+
+`run` 和 `profile` 在任何预热、计时和 profiler 之前执行预检。新增 `validate` 入口只采集预检并生成报告，不进入正式生成或测量：
+
+```bash
+python -m kvlab validate --config configs/gpu-smoke.yaml \
+  --set model.dtype=float32 --set model.sdpa_kernel=math \
+  --set label=precheck-fp32-math
+```
+
+每次保存 `full_validation.json`、`validation_trajectory.json` 和 HTML 中的逐步诊断表。数值硬门槛失败后继续采集剩余计划步骤，最终返回失败退出码并阻止正式测量；位置、输入、Cache、mask、非有限值或 kernel 异常则保存已有证据后提前停止。单独的数值告警不阻止测量，但会在终端、status 和 HTML 中显示。即使上面命令因数值超差退出，完整生成的参考轨迹仍可重放；`complete=false` 的不完整轨迹会被拒绝。
+
+报告的检查标志使用三态：已发现失败为 `false`，完整执行并通过为 `true`，提前中止且尚未发现该类错误为 `null`。必须同时查看 `completed_steps/planned_steps` 和 `fatal_error`，不能将未完成的检查视为通过。
+
+默认 `validation.prefix_tokens=32`、`validation.decode_steps=3`、`validation.top_k=8`、`validation.trajectory_path=null`。前缀是实际准备后输入的最前面部分，可能主要是填充文本；可显式设 `validation.prefix_tokens=256` 检查 gpu-smoke 的整个输入。仅检查第一个样本和第一个输入长度，不代表整个数据集或长上下文已验收。
+
+三条路径为 A：平台 full/no-op cached；B：直接 HF cached，由 HF 推导位置；C：无 Cache 重算完整前缀。A/B 使用独立 Cache，full/no-op 额外核对 KV 内容、地址和元数据。C 路径先生成参考 token，A/B 始终喂入相同 token；固定步数忽略 EOS，仅用于数值预检。step=0 比较 prefill 对 y0 的预测；step=1..3 分别喂入 y0..y2，比较对 y1..y3 的预测，最后一个参考 token 不送回模型。
+
+逐步报告包含三组比较 A_vs_C、A_vs_B、B_vs_C，前者为 candidate、后者为 reference，例如 A_vs_C 的 KL 方向是 C‖A。指标包括 max/mean absolute error、RMSE、共同偏移和 centered RMSE、违规数量/比例、违规分量的双方 logits/允许误差、signed KL(reference‖candidate)、概率 L1、目标 NLL 及其绝对差、全词表最大 log-probability 差、top-1 概率与 top-1/top-2 logit 间隔。KL 不夹为零；统计在 CPU FP64 上计算，不代表前向改用了 FP64，也不能恢复低精度前向的误差。每层保存实际输入、RoPE position_ids、物理 cache_position、KV 形状/dtype/device，以及 SDPA 边界的 Q/K/V、mask、is_causal、GQA 与启用的 backend。完整张量和 attention 矩阵不落盘。
+
+预检报告 schema=3 使用 `layered-v1` 分层验收，覆盖 prefill 和所有 decode 步，不在步骤间取平均来掩盖单步失败：
+
+- 结构与执行：语义、有限性检查全部通过，且所有计划步骤完整完成。
+- 平台一致性：A_vs_B 必须通过 FP32 `allclose`，使用当前 dtype 的 `cached_atol/cached_rtol`。
+- 分布近似：三组比较都必须满足 `abs(KL) <= kl`、概率 L1 `<= probability_l1`、当前固定参考 token 的 NLL 绝对差 `<= nll_abs`。KL 保留原始带符号统计，按绝对值判定，避免负数值噪声绕过门槛。
+- 贪心选择：三组比较的 top-1 必须相同。即使 top-1/top-2 接近并列，也采用保守失败规则，双方 margin 保留用于定位。
+- 数值告警：A_vs_C/B_vs_C 的原始 logits allclose 超差，以及任意比较的全词表最大 log-probability 差超出 `warn_logprob_max_abs`，只告警，不等同于分布验收失败。
+
+默认阈值按**实际模型 dtype** 选择，所有数值为待校准的试运行值，未声称适用于全部模型、kernel 或长度：
+
+| dtype | cached_atol | cached_rtol | kl | probability_l1 | nll_abs | warn_logprob_max_abs |
+|---|---:|---:|---:|---:|---:|---:|
+| float32 | 2e-5 | 0.02 | 1e-7 | 1e-4 | 1e-3 | 1e-3 |
+| float16 | 0.01 | 0.02 | 1e-5 | 0.002 | 0.001 | 0.01 |
+| bfloat16 | 0.08 | 0.02 | 1e-3 | 0.02 | 0.01 | 0.1 |
+
+通过 YAML 的 `validation.thresholds.<dtype>.<指标>` 或命令行覆盖，例如 `--set validation.thresholds.bfloat16.kl=0.0005`。阈值必须为有限非负数，不接受 bool、null、NaN/Inf 或未知字段。全部 dtype 的配置保存在 `config.resolved.json`，当前生效阈值另存于预检报告 `policy`。
+
+报告另存 `implementation_checks_passed`、`distribution_checks_passed`、`top1_checks_passed` 及逐步 `assessments`。`numeric_status=pass` 表示硬门槛通过且没有告警，`pass_with_warnings` 表示硬门槛通过但仍有数值告警（退出码 0，允许正式运行），`failed` 表示硬门槛失败（退出码 1）。原有 `legacy_allclose_passed` 仍记录 decode 步 A_vs_C 的 allclose 汇总，可能为 false 而分层验收通过。告警不能被解读为全词表数值一致或低概率 token 的 NLL 已验证。
+
+先用代表性任务、较不确定的分布和多个上下文长度校准，再在独立样本上验证；同时注入位置、mask、KV 更新错误，确认阈值不会放过实现错误。不同 dtype/backend 分别检查，不能为了让单个 smoke 样本通过而不断扩大阈值。所有观测 hook 和临时 SDPA 包装在结束/异常时恢复，预检需串行执行，不用于性能结论。
+
+跨精度或 backend 比较时，显式重放第一份轨迹，避免各次运行重新选择不同 token：
+
+```bash
+python -m kvlab validate --config configs/gpu-smoke.yaml \
+  --set model.dtype=bfloat16 --set model.sdpa_kernel=flash \
+  --set 'validation.trajectory_path=outputs/替换为FP32运行目录/validation_trajectory.json' \
+  --set label=precheck-bf16-flash-replay
+```
+
+重放检查前缀 token IDs、模型/tokenizer 身份、轨迹长度和 hash，允许 dtype/backend 改变。需保持同一前缀长度、步数、tokenizer 和模型权重；身份记录不是全部权重张量的校验和，本地权重仍须保持只读，远端建议固定 commit。重放仅固定预检输入，正式质量评测仍按自己的 full continuation 进行。
+
 ## 两种采集路径与质量评测
 
 行为模式 `mode: diagnostic` 安装 hook，仅重算选定 decode query 的 QK 分布：支持 layers/heads/steps、key 数上限、记录数上限、分块大小、直方图和 top-k。使用模型真实 Q 归一化、已旋转 K 与 GQA 映射。两遍 FP32 分块 logsumexp/聚合，不保存全层、全步或 prefill 的 N×N attention。原 forward backend 与重算方法明确记录；采集上限跳过原因保存在 `diagnostic_skips`。默认 SDPA 不需要为了 attention 切换 eager；可显式改 eager 做小输入诊断。诊断耗时不能用于正式性能结论。
@@ -122,6 +175,7 @@ JSONL 数据必须含字符串 `id`、`prompt`，可选 `reference`（字符串�
 config.source.json / config.resolved.json   配置源、覆盖与完整有效配置
 environment.json / model.json / code.json  依赖、GPU、revision、模板、源代码 hash
 samples.json / full_validation.json        原始样本与运行前 full 正确性预检
+validation_trajectory.json                 预检固定参考 token、身份与 hash；可跨精度/backend 重放
 records.jsonl / records.csv                所有测量重复、输出、位置、质量、显存与逐步时间
 summary.json / summary.csv                 按模式、长度、任务、策略聚合，保留 n 与离散程度
 comparisons.json / comparisons.csv         同次运行内兼容记录与 full 的配对比较

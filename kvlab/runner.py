@@ -284,7 +284,14 @@ def run(config, source_path, overrides=(), profile=False, validation_only=False)
         dump(directory / "validation_trajectory.json", validation_report["trajectory"])
         status["validation"] = {key: validation_report[key] for key in (
             "passed", "semantic_checks_passed", "finite_checks_passed", "legacy_allclose_passed",
-            "first_failed_step", "first_failed_stage", "completed_steps", "planned_steps")}
+            "implementation_checks_passed", "distribution_checks_passed", "top1_checks_passed",
+            "numeric_status", "policy", "first_failed_step", "first_failed_stage", "completed_steps", "planned_steps")}
+        if validation_report["warnings"]:
+            message = (f"预检 {validation_report['numeric_status']}："
+                       f"{len(validation_report['warnings'])} 条数值告警；详见 full_validation.json，"
+                       "概率近似通过不代表全词表 logits 一致，阈值仍需代表性输入校准")
+            warnings.append(message)
+            print(message, flush=True)
         if not validation_report["passed"]:
             raise FullValidationError(validation_report)
         if validation_only:
