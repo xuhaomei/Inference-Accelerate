@@ -114,7 +114,7 @@ python -m kvlab validate --config configs/gpu-smoke.yaml \
   --set label=precheck-fp32-math
 ```
 
-每次保存 `full_validation.json`、`validation_trajectory.json` 和 HTML 中的逐步诊断表。数值硬门槛失败后继续采集剩余计划步骤，最终返回失败退出码并阻止正式测量；位置、输入、Cache、mask、非有限值或 kernel 异常则保存已有证据后提前停止。单独的数值告警不阻止测量，但会在终端、status 和 HTML 中显示。即使上面命令因数值超差退出，完整生成的参考轨迹仍可重放；`complete=false` 的不完整轨迹会被拒绝。
+执行预检后保存 `full_validation.json` 和 HTML 中的逐步诊断表；仅当参考 token 已采集完整时另存 `validation_trajectory.json`。数值硬门槛失败后继续采集剩余计划步骤，最终返回失败退出码并阻止正式测量；位置、输入、Cache、mask、非有限值或 kernel 异常则保存已有证据后提前停止，不完整轨迹保留在预检报告内，不另存可重放文件。单独的数值告警不阻止测量，但会在终端、status 和 HTML 中显示。即使上面命令因数值超差退出，完整生成的参考轨迹仍可重放；输入的 `complete=false` 不完整轨迹仍会被拒绝。
 
 报告的检查标志使用三态：已发现失败为 `false`，完整执行并通过为 `true`，提前中止且尚未发现该类错误为 `null`。必须同时查看 `completed_steps/planned_steps` 和 `fatal_error`，不能将未完成的检查视为通过。
 
@@ -169,19 +169,20 @@ JSONL 数据必须含字符串 `id`、`prompt`，可选 `reference`（字符串�
 
 ## 计时、显存与报告
 
-详细定义见 [测量说明](docs/measurement.md)。每次运行产生 `outputs/<UTC时间>-<label>/`：
+详细定义见 [测量说明](docs/measurement.md)。运行目录为 `outputs/<UTC时间>-<label>/`；文件仅在对应数据实际存在时生成：
 
 ```text
 config.source.json / config.resolved.json   配置源、覆盖与完整有效配置
 environment.json / model.json / code.json  依赖、GPU、revision、模板、源代码 hash
 samples.json / full_validation.json        原始样本与运行前 full 正确性预检
-validation_trajectory.json                 预检固定参考 token、身份与 hash；可跨精度/backend 重放
-records.jsonl / records.csv                所有测量重复、输出、位置、质量、显存与逐步时间
-summary.json / summary.csv                 按模式、长度、任务、策略聚合，保留 n 与离散程度
-comparisons.json / comparisons.csv         同次运行内兼容记录与 full 的配对比较
-status.json                               完成/失败、错误、警告；失败也尽量生成报告
-01-context.png ... 06-relative.png         六类真实结果图，缺失数据标记 Not collected
-report.html                               可直接离线打开；无服务、无 CDN
+validation_trajectory.json                 仅完整参考轨迹；可跨精度/backend 重放
+records.jsonl                             已完成请求的原始记录；中途失败也保留
+records.csv                               成功运行且存在正式记录时导出
+summary.json / summary.csv                 成功运行且存在自由生成记录时聚合
+comparisons.json / comparisons.csv         成功运行且有实际配对指标时生成
+status.json                               完成/失败、错误与警告
+01-context.png ... 06-relative.png         最多六类结果图，仅生成有数据的图及子图
+report.html                               离线结果报告；失败/独立预检时保留诊断报告
 trace.json                                仅独立 profile 命令生成
 ```
 
@@ -191,7 +192,11 @@ trace.json                                仅独立 profile 命令生成
 python -m kvlab report outputs/<实际运行目录>
 ```
 
-报告自动展示上下文/decode/KV、预算/质量、预算/请求时间、模型/管理成本、历史访问、相对 full 的 NLL 变化与加速比。PNG 使用英文轴标签保证无中文字体机器可读，HTML 的解释为中文。缺数据保持 null 并标记未采集，不填零。为避免错误合并，第一版**每次运行独立报告，不跨运行自动比较**；仅相同模式、输入 hash、sample、seed、repeat 与 full 配对，baseline 和单位/n 明示。性能与质量结果分别展示，无法自动组合为同一速度质量点。
+报告按实际数据展示上下文/decode/KV、预算/质量、预算/请求时间、模型/管理成本、历史访问、相对 full 的 NLL 变化与加速比。PNG 使用英文轴标签保证无中文字体机器可读，HTML 的解释为中文。不生成 `Not collected` 占位图，也不保留空白子图；零误差、零准确率等实际的 0 仍正常输出。图表和导出的空表不生成，原始记录中的缺失字段仍为 null，不填零。
+
+典型情况下，质量运行生成 `01-context.png`（仅 KV）、有标注时的 `02-quality.png`，以及有固定轨迹配对时的 `06-relative.png`（仅 NLL）；诊断运行生成 KV 图及实际采集到的 attention 图；正式 CUDA 性能运行生成上下文、请求耗时、成本图及有配对时的加速比图。独立 `validate` 和失败运行不生成结果 PNG、CSV、summary/comparisons JSON。失败时保留状态、错误、已完成的原始 JSONL 与实际获得的预检诊断，不把部分请求汇总成正式结果。
+
+重建报告会清理本程序固定命名、已不适用的旧 PNG 与派生表；保留原始 JSONL、诊断和其他用户文件。HTML 仅链接实际存在的文件，不显示空结果区块。为避免错误合并，第一版**每次运行独立报告，不跨运行自动比较**；仅相同模式、输入 hash、sample、seed、repeat 与 full 配对，baseline 和单位/n 明示。性能与质量结果分别展示，无法自动组合为同一速度质量点。
 
 预算—完整请求耗时图保留完整策略 ID 和输入长度。同预算不同 `recent_window`，或预算封顶后实际保留数相同的不同请求预算，会显示为独立系列；中位数仅在同一系列内聚合。已有运行可用上面的 `report` 命令重新生成图表，无需重新执行模型。
 

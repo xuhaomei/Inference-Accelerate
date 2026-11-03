@@ -281,7 +281,8 @@ def run(config, source_path, overrides=(), profile=False, validation_only=False)
         validation_report["sample_id"] = cases[0][0]["id"]
         validation_report["requested_input_tokens"] = cases[0][1]
         dump(directory / "full_validation.json", validation_report)
-        dump(directory / "validation_trajectory.json", validation_report["trajectory"])
+        if validation_report["trajectory"]["complete"]:
+            dump(directory / "validation_trajectory.json", validation_report["trajectory"])
         status["validation"] = {key: validation_report[key] for key in (
             "passed", "semantic_checks_passed", "finite_checks_passed", "legacy_allclose_passed",
             "implementation_checks_passed", "distribution_checks_passed", "top1_checks_passed",

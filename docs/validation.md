@@ -1,5 +1,15 @@
 # 本机验证记录与限制
 
+## 按实际数据生成产物（2026-11-03）
+
+结果生成规则已调整：只有成功完成且存在正式记录时才导出对应 CSV、summary/comparisons JSON 和有数据的 PNG；空配对表不导出。图中不再包含 `Not collected` 占位子图。失败运行保留状态、错误、配置、实际采集的诊断及已完成请求的原始 JSONL，不将部分记录聚合为结果。不完整的参考轨迹保留在 `full_validation.json` 内，不另写 `validation_trajectory.json`。重建报告只清理固定命名的派生图表，保留原始记录、诊断和其他用户文件。
+
+Python **3.10.12** 全套测试 **122 passed、1 skipped（CUDA）**，日志：`outputs/conditional-artifacts-verification/pytest.txt`。新增回归覆盖空运行、独立预检、预检失败、生成中途失败、模式变化后的旧文件清理、无标注与无配对、实际零值保留、单个子图布局、缺失成本项、diagnostic 采集缺失及 CPU/profiler 的性能图隔离。原先强制生成六图的旧测试已更新为按实际数据检查。
+
+CPU tiny 实际 CLI 及文件清单记录在 `outputs/conditional-artifacts-verification/cli-audit.json`：quality 仅生成 01/02/06，diagnostic 仅生成 01/05，CPU performance 仅生成 01，独立 validate 和超长输入失败不生成结果图或派生表。每个目录又通过 `report` 重建，核对旧占位图被清理、原始 JSONL 字节保持不变。已目视检查 quality 的单 KV 子图和单 NLL 子图，无空白半图。未在本机重新执行 CUDA 性能测量；CUDA 绘图筛选通过受控 fixture 验证，不作为真实 GPU 性能结果。
+
+以下历史记录中的“每次生成六张图”和 `Not collected` 为旧版行为，新运行及显式重建报告采用上述规则。
+
 实施日期：2026-10-21（Asia/Shanghai）。初始目录为空，无已有代码或适用 AGENTS.md。主机为 macOS ARM，无 NVIDIA GPU、无目标模型。最初未安装第三方依赖，已在工作目录 `.venv` 安装固定版本并以 editable 方式安装本项目。
 
 ## 实际执行的检查
